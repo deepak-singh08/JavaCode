@@ -1,0 +1,674 @@
+import { useState, useEffect, useCallback, useRef } from "react";
+
+const STAGES = [
+  { id: 1, key: "listed", label: "Residue Listed", icon: "📋", role: "Farmer" },
+  { id: 2, key: "cluster_created", label: "Cluster Created", icon: "🔗", role: "Platform" },
+  { id: 3, key: "transport_assigned", label: "Transport Assigned", icon: "🚛", role: "Platform" },
+  { id: 4, key: "pickup_started", label: "Pickup Started", icon: "🚜", role: "Transporter" },
+  { id: 5, key: "pickup_confirmed", label: "Pickup Confirmed", icon: "✅", role: "Transporter" },
+  { id: 6, key: "gps_captured", label: "GPS Captured", icon: "📍", role: "System" },
+  { id: 7, key: "in_transit", label: "Cluster In Transit", icon: "🛣️", role: "Transporter" },
+  { id: 8, key: "hub_received", label: "Hub Received", icon: "🏭", role: "Hub" },
+  { id: 9, key: "processing_started", label: "Processing Started", icon: "⚙️", role: "Hub" },
+  { id: 10, key: "processing_completed", label: "Processing Completed", icon: "✨", role: "Hub" },
+  { id: 11, key: "payment_released", label: "Payment Released", icon: "💰", role: "Platform" },
+  { id: 12, key: "token_closed", label: "Token Closed", icon: "🔒", role: "System" },
+];
+
+function genId(prefix) {
+  return `${prefix}-${Math.floor(1000 + Math.random() * 9000)}`;
+}
+
+function genCoords() {
+  return {
+    lat: (30.5 + Math.random() * 0.5).toFixed(5),
+    lng: (75.8 + Math.random() * 0.5).toFixed(5),
+  };
+}
+
+function now() {
+  return new Date().toLocaleString("en-IN", { hour12: true, hour: "2-digit", minute: "2-digit", day: "2-digit", month: "short" });
+}
+
+function createToken(farmerId, farmerName, residueType, qty) {
+  const farmToken = genId("KKT-FRM");
+  const clsToken = genId("KKT-CLS");
+  const coords = genCoords();
+  return {
+    id: farmToken,
+    clsId: clsToken,
+    farmerId,
+    farmerName,
+    residueType,
+    qty,
+    currentStage: 1,
+    status: "active",
+    progress: 8,
+    transparencyScore: 10,
+    processingETA: null,
+    coords,
+    activityFeed: [
+      { time: now(), msg: `Token ${farmToken} created for ${farmerName}`, type: "info" },
+      { time: now(), msg: `Residue listing confirmed: ${qty}kg ${residueType}`, type: "success" },
+    ],
+    checkpoints: STAGES.map((s, i) => ({
+      stageId: s.id,
+      status: i === 0 ? "completed" : "pending",
+      timestamp: i === 0 ? now() : null,
+      stakeholder: s.role,
+      coords: i === 0 ? coords : null,
+    })),
+    paymentAmount: (qty * 12).toFixed(0),
+    paymentStatus: "pending",
+  };
+}
+
+const INITIAL_TOKENS = [
+  createToken("FRM-001", "Harjinder Singh", "Paddy Straw", 420),
+  createToken("FRM-002", "Gurpreet Kaur", "Wheat Stubble", 280),
+];
+INITIAL_TOKENS[0].currentStage = 7;
+INITIAL_TOKENS[0].progress = 58;
+INITIAL_TOKENS[0].transparencyScore = 72;
+INITIAL_TOKENS[0].processingETA = "~2 hrs";
+INITIAL_TOKENS[0].checkpoints = INITIAL_TOKENS[0].checkpoints.map((c, i) => ({
+  ...c,
+  status: i < 7 ? "completed" : i === 7 ? "active" : "pending",
+  timestamp: i < 7 ? now() : null,
+  coords: i < 7 ? genCoords() : null,
+}));
+INITIAL_TOKENS[0].activityFeed = [
+  { time: now(), msg: "Token KKT-FRM-1023 closed pending GPS sync", type: "warn" },
+  { time: now(), msg: "Cluster KKT-CLS-2201 now in transit", type: "info" },
+  { time: now(), msg: "Transporter Rajveer Singh confirmed pickup", type: "success" },
+  { time: now(), msg: "GPS coordinates captured at Ludhiana bypass", type: "info" },
+  { time: now(), msg: "Cluster created with 3 farmers merged", type: "success" },
+];
+
+const ROLES = ["Farmer", "Transporter", "Hub", "Buyer"];
+
+const COLORS = {
+  completed: { bg: "#e8f5e9", text: "#2e7d32", border: "#a5d6a7" },
+  active: { bg: "#e3f2fd", text: "#1565c0", border: "#90caf9" },
+  pending: { bg: "#f5f5f5", text: "#757575", border: "#e0e0e0" },
+  warning: { bg: "#fff8e1", text: "#f57f17", border: "#ffe082" },
+};
+
+function Badge({ status, label }) {
+  const c = COLORS[status] || COLORS.pending;
+  return (
+    <span style={{
+      background: c.bg, color: c.text, border: `1px solid ${c.border}`,
+      borderRadius: 20, padding: "2px 10px", fontSize: 11, fontWeight: 600,
+      textTransform: "uppercase", letterSpacing: 0.5
+    }}>{label || status}</span>
+  );
+}
+
+function ProgressBar({ value }) {
+  const color = value < 33 ? "#ef9f27" : value < 66 ? "#378add" : "#1d9e75";
+  return (
+    <div style={{ background: "#f0f0f0", borderRadius: 8, height: 8, overflow: "hidden" }}>
+      <div style={{
+        width: `${value}%`, height: "100%", background: color,
+        transition: "width 0.6s ease", borderRadius: 8
+      }} />
+    </div>
+  );
+}
+
+function TransparencyScore({ score }) {
+  const color = score < 40 ? "#e24b4a" : score < 70 ? "#ef9f27" : "#1d9e75";
+  return (
+    <div style={{ textAlign: "center" }}>
+      <svg width={64} height={64} viewBox="0 0 64 64">
+        <circle cx={32} cy={32} r={26} fill="none" stroke="#e0e0e0" strokeWidth={5} />
+        <circle cx={32} cy={32} r={26} fill="none" stroke={color} strokeWidth={5}
+          strokeDasharray={`${(score / 100) * 163.4} 163.4`}
+          strokeLinecap="round" transform="rotate(-90 32 32)"
+          style={{ transition: "stroke-dasharray 0.8s ease" }}
+        />
+        <text x={32} y={37} textAnchor="middle" fontSize={14} fontWeight={700} fill={color}>{score}</text>
+      </svg>
+      <div style={{ fontSize: 10, color: "#888", marginTop: -4 }}>Transparency</div>
+    </div>
+  );
+}
+
+function ActivityFeed({ feed }) {
+  return (
+    <div style={{ maxHeight: 160, overflowY: "auto", display: "flex", flexDirection: "column", gap: 6 }}>
+      {feed.slice().reverse().map((f, i) => {
+        const c = f.type === "success" ? "#1d9e75" : f.type === "warn" ? "#ef9f27" : "#378add";
+        return (
+          <div key={i} style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 12 }}>
+            <div style={{ width: 6, height: 6, borderRadius: "50%", background: c, marginTop: 4, flexShrink: 0 }} />
+            <span style={{ color: "#555" }}>{f.time}</span>
+            <span style={{ color: "#222", flex: 1 }}>{f.msg}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function CheckpointTimeline({ checkpoints, tokenId, onAdvance, role }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
+      {STAGES.map((stage, i) => {
+        const cp = checkpoints[i];
+        const isActive = cp.status === "active";
+        const isDone = cp.status === "completed";
+        const canAdvance = isActive && (
+          (role === "Transporter" && [4, 5, 6, 7].includes(stage.id)) ||
+          (role === "Hub" && [8, 9, 10].includes(stage.id)) ||
+          (role === "Farmer" && stage.id === 1) ||
+          (role === "Buyer" && false)
+        );
+
+        return (
+          <div key={stage.id} style={{ display: "flex", gap: 16, position: "relative" }}>
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", width: 32 }}>
+              <div style={{
+                width: 28, height: 28, borderRadius: "50%",
+                background: isDone ? "#1d9e75" : isActive ? "#378add" : "#e0e0e0",
+                display: "flex", alignItems: "center", justifyContent: "center",
+                fontSize: 13, transition: "background 0.4s",
+                boxShadow: isActive ? "0 0 0 3px rgba(55,138,221,0.25)" : "none",
+                animation: isActive ? "pulse 2s infinite" : "none",
+                flexShrink: 0, zIndex: 1
+              }}>
+                {isDone ? "✓" : isActive ? "●" : stage.id}
+              </div>
+              {i < STAGES.length - 1 && (
+                <div style={{
+                  width: 2, flex: 1, minHeight: 28,
+                  background: isDone ? "#1d9e75" : "#e0e0e0",
+                  transition: "background 0.4s"
+                }} />
+              )}
+            </div>
+            <div style={{
+              flex: 1, paddingBottom: 16,
+              opacity: cp.status === "pending" ? 0.5 : 1,
+              transition: "opacity 0.3s"
+            }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                <span style={{ fontSize: 14, fontWeight: 600, color: "#1a1a1a" }}>{stage.label}</span>
+                <Badge status={cp.status === "completed" ? "completed" : cp.status === "active" ? "active" : "pending"}
+                  label={cp.status === "completed" ? "Done" : cp.status === "active" ? "In Progress" : "Pending"} />
+                {cp.stakeholder && <span style={{ fontSize: 11, color: "#888", background: "#f5f5f5", borderRadius: 10, padding: "1px 8px" }}>{cp.stakeholder}</span>}
+              </div>
+              {cp.timestamp && <div style={{ fontSize: 11, color: "#888", marginTop: 2 }}>🕐 {cp.timestamp}</div>}
+              {cp.coords && (
+                <div style={{ fontSize: 11, color: "#1565c0", marginTop: 2 }}>
+                  📍 {cp.coords.lat}, {cp.coords.lng}
+                  <button onClick={() => alert(`Opening map: ${cp.coords.lat}, ${cp.coords.lng}\n(Map integration ready for Google Maps API)`)}
+                    style={{ marginLeft: 8, fontSize: 10, padding: "1px 8px", borderRadius: 10, border: "1px solid #90caf9", background: "#e3f2fd", color: "#1565c0", cursor: "pointer" }}>
+                    View Live Location
+                  </button>
+                </div>
+              )}
+              {canAdvance && (
+                <button onClick={() => onAdvance(tokenId, stage.id)}
+                  style={{
+                    marginTop: 6, padding: "4px 14px", borderRadius: 16,
+                    background: "#1d9e75", color: "#fff", border: "none",
+                    fontSize: 12, cursor: "pointer", fontWeight: 600
+                  }}>
+                  Confirm → {stage.label}
+                </button>
+              )}
+
+              {isActive && stage.id === 6 && (
+                <button onClick={() => {
+                  if (navigator.geolocation) {
+                    navigator.geolocation.getCurrentPosition(
+                      (pos) => onAdvance(tokenId, stage.id, { lat: pos.coords.latitude.toFixed(5), lng: pos.coords.longitude.toFixed(5) }),
+                      () => onAdvance(tokenId, stage.id, genCoords())
+                    );
+                  } else {
+                    onAdvance(tokenId, stage.id, genCoords());
+                  }
+                }}
+                  style={{
+                    marginTop: 6, padding: "4px 14px", borderRadius: 16,
+                    background: "#378add", color: "#fff", border: "none",
+                    fontSize: 12, cursor: "pointer", fontWeight: 600
+                  }}>
+                  📍 Capture GPS Location
+                </button>
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function MapPlaceholder({ coords }) {
+  return (
+    <div style={{
+      border: "1px dashed #90caf9", borderRadius: 12, padding: "20px 16px",
+      background: "#f0f7ff", textAlign: "center", marginTop: 12
+    }}>
+      <div style={{ fontSize: 28 }}>🗺️</div>
+      <div style={{ fontWeight: 600, fontSize: 13, color: "#1565c0", marginTop: 4 }}>Live Map Placeholder</div>
+      <div style={{ fontSize: 11, color: "#555", marginTop: 4 }}>
+        Ready for Google Maps API integration<br />
+        Last known: {coords ? `${coords.lat}, ${coords.lng}` : "N/A"}
+      </div>
+      <div style={{ marginTop: 8, display: "flex", gap: 8, justifyContent: "center" }}>
+        <span style={{ fontSize: 10, background: "#e3f2fd", color: "#1565c0", padding: "2px 8px", borderRadius: 10 }}>Live GPS feed ready</span>
+        <span style={{ fontSize: 10, background: "#e8f5e9", color: "#2e7d32", padding: "2px 8px", borderRadius: 10 }}>Route tracking enabled</span>
+      </div>
+    </div>
+  );
+}
+
+function TokenCard({ token, expanded, onToggle, onAdvance, role }) {
+  const stage = STAGES.find(s => s.id === token.currentStage);
+  const isCompleted = token.currentStage === 12 && token.checkpoints[11].status === "completed";
+
+  return (
+    <div style={{
+      border: "1px solid #e0e0e0", borderRadius: 14,
+      background: "#fff", overflow: "hidden",
+      boxShadow: expanded ? "0 4px 20px rgba(0,0,0,0.08)" : "none",
+      transition: "box-shadow 0.3s"
+    }}>
+      <div onClick={onToggle} style={{
+        padding: "14px 18px", cursor: "pointer",
+        background: isCompleted ? "#f1f8e9" : "#fff",
+        borderBottom: expanded ? "1px solid #f0f0f0" : "none",
+        display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap"
+      }}>
+        <div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 4 }}>
+            <span style={{ fontFamily: "monospace", fontWeight: 700, fontSize: 13, color: "#1565c0" }}>{token.id}</span>
+            <span style={{ fontFamily: "monospace", fontSize: 11, color: "#888" }}>{token.clsId}</span>
+            {isCompleted && <Badge status="completed" label="Closed" />}
+            {token.paymentStatus === "pending" && !isCompleted && <Badge status="warning" label="Payment Pending" />}
+          </div>
+          <div style={{ fontSize: 13, color: "#444" }}>
+            {token.farmerName} · {token.qty}kg {token.residueType}
+          </div>
+          <div style={{ fontSize: 12, color: "#888", marginTop: 2 }}>
+            Stage: {stage?.label} · ETA: {token.processingETA || "Calculating..."}
+          </div>
+        </div>
+        <div style={{ marginLeft: "auto", display: "flex", gap: 16, alignItems: "center" }}>
+          <TransparencyScore score={token.transparencyScore} />
+          <div style={{ minWidth: 100 }}>
+            <div style={{ fontSize: 11, color: "#888", marginBottom: 4 }}>{token.progress}% complete</div>
+            <ProgressBar value={token.progress} />
+          </div>
+          <span style={{ fontSize: 18, color: "#888" }}>{expanded ? "▲" : "▼"}</span>
+        </div>
+      </div>
+
+      {expanded && (
+        <div style={{ padding: "16px 18px", display: "flex", flexDirection: "column", gap: 16 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10 }}>
+            {[
+              { label: "Token ID", val: token.id, color: "#1565c0" },
+              { label: "Cluster ID", val: token.clsId, color: "#6a1b9a" },
+              { label: "Payment", val: `₹${token.paymentAmount}`, color: token.paymentStatus === "released" ? "#2e7d32" : "#e65100" },
+              { label: "Residue", val: `${token.qty}kg ${token.residueType}`, color: "#555" },
+              { label: "ETA", val: token.processingETA || "TBD", color: "#555" },
+              { label: "Transparency", val: `${token.transparencyScore}/100`, color: token.transparencyScore > 70 ? "#2e7d32" : "#e65100" },
+            ].map(({ label, val, color }) => (
+              <div key={label} style={{ background: "#f9f9f9", borderRadius: 8, padding: "8px 12px" }}>
+                <div style={{ fontSize: 11, color: "#888" }}>{label}</div>
+                <div style={{ fontSize: 13, fontWeight: 600, color }}>{val}</div>
+              </div>
+            ))}
+          </div>
+
+          <MapPlaceholder coords={token.coords} />
+
+          <div>
+            <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 10, color: "#333" }}>Supply Chain Journey</div>
+            <CheckpointTimeline
+              checkpoints={token.checkpoints}
+              tokenId={token.id}
+              onAdvance={onAdvance}
+              role={role}
+            />
+          </div>
+
+          <div>
+            <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 8, color: "#333" }}>Live Activity Feed</div>
+            <ActivityFeed feed={token.activityFeed} />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FarmerDashboard({ tokens, onAdvance }) {
+  const [expandedId, setExpandedId] = useState(null);
+  const active = tokens.filter(t => t.currentStage < 12);
+  const completed = tokens.filter(t => t.currentStage === 12 && t.checkpoints[11]?.status === "completed");
+  const paymentPending = tokens.filter(t => t.paymentStatus === "pending" && t.currentStage > 1);
+
+  return (
+    <div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10, marginBottom: 20 }}>
+        {[
+          { label: "Active Tokens", val: active.length, color: "#1565c0" },
+          { label: "Completed", val: completed.length, color: "#2e7d32" },
+          { label: "Payment Pending", val: paymentPending.length, color: "#e65100" },
+          { label: "Total Residue", val: `${tokens.reduce((s, t) => s + t.qty, 0)}kg`, color: "#6a1b9a" },
+        ].map(({ label, val, color }) => (
+          <div key={label} style={{ background: "#fff", border: "1px solid #e8e8e8", borderRadius: 10, padding: "12px 14px" }}>
+            <div style={{ fontSize: 11, color: "#888" }}>{label}</div>
+            <div style={{ fontSize: 22, fontWeight: 700, color }}>{val}</div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        {tokens.map(t => (
+          <TokenCard key={t.id} token={t}
+            expanded={expandedId === t.id}
+            onToggle={() => setExpandedId(expandedId === t.id ? null : t.id)}
+            onAdvance={onAdvance} role="Farmer" />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function TransporterDashboard({ tokens, onAdvance }) {
+  const [expandedId, setExpandedId] = useState(null);
+  const actionable = tokens.filter(t => t.currentStage >= 4 && t.currentStage <= 7);
+
+  return (
+    <div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10, marginBottom: 20 }}>
+        {[
+          { label: "Assigned Clusters", val: tokens.length, color: "#1565c0" },
+          { label: "Action Required", val: actionable.length, color: "#e65100" },
+          { label: "In Transit", val: tokens.filter(t => t.currentStage === 7).length, color: "#2e7d32" },
+        ].map(({ label, val, color }) => (
+          <div key={label} style={{ background: "#fff", border: "1px solid #e8e8e8", borderRadius: 10, padding: "12px 14px" }}>
+            <div style={{ fontSize: 11, color: "#888" }}>{label}</div>
+            <div style={{ fontSize: 22, fontWeight: 700, color }}>{val}</div>
+          </div>
+        ))}
+      </div>
+      {actionable.length > 0 && (
+        <div style={{ background: "#fff8e1", border: "1px solid #ffe082", borderRadius: 10, padding: "10px 14px", marginBottom: 14, fontSize: 13, color: "#7f5000" }}>
+          ⚡ {actionable.length} shipment(s) require your action to advance the supply chain.
+        </div>
+      )}
+      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        {tokens.map(t => (
+          <TokenCard key={t.id} token={t}
+            expanded={expandedId === t.id}
+            onToggle={() => setExpandedId(expandedId === t.id ? null : t.id)}
+            onAdvance={onAdvance} role="Transporter" />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function HubDashboard({ tokens, onAdvance }) {
+  const [expandedId, setExpandedId] = useState(null);
+  const received = tokens.filter(t => t.currentStage >= 8);
+
+  return (
+    <div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10, marginBottom: 20 }}>
+        {[
+          { label: "Received", val: tokens.filter(t => t.currentStage >= 8).length, color: "#2e7d32" },
+          { label: "Processing", val: tokens.filter(t => t.currentStage === 9).length, color: "#1565c0" },
+          { label: "Completed", val: tokens.filter(t => t.currentStage >= 10).length, color: "#6a1b9a" },
+        ].map(({ label, val, color }) => (
+          <div key={label} style={{ background: "#fff", border: "1px solid #e8e8e8", borderRadius: 10, padding: "12px 14px" }}>
+            <div style={{ fontSize: 11, color: "#888" }}>{label}</div>
+            <div style={{ fontSize: 22, fontWeight: 700, color }}>{val}</div>
+          </div>
+        ))}
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        {tokens.map(t => (
+          <TokenCard key={t.id} token={t}
+            expanded={expandedId === t.id}
+            onToggle={() => setExpandedId(expandedId === t.id ? null : t.id)}
+            onAdvance={onAdvance} role="Hub" />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function BuyerDashboard({ tokens }) {
+  const [expandedId, setExpandedId] = useState(null);
+
+  return (
+    <div>
+      <div style={{ background: "#e3f2fd", border: "1px solid #90caf9", borderRadius: 10, padding: "10px 14px", marginBottom: 16, fontSize: 13, color: "#0d47a1" }}>
+        👁 Buyer view is read-only. You can monitor the full processing lifecycle with supply chain transparency scores.
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        {tokens.map(t => (
+          <TokenCard key={t.id} token={t}
+            expanded={expandedId === t.id}
+            onToggle={() => setExpandedId(expandedId === t.id ? null : t.id)}
+            onAdvance={() => {}} role="Buyer" />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+export default function KhetKartTracking() {
+  const [tokens, setTokens] = useState(INITIAL_TOKENS);
+  const [activeRole, setActiveRole] = useState("Farmer");
+  const [showNewModal, setShowNewModal] = useState(false);
+  const [newForm, setNewForm] = useState({ farmerName: "", residueType: "Paddy Straw", qty: 200 });
+  const tickRef = useRef(null);
+
+  const advanceToken = useCallback((tokenId, stageId, forcedCoords) => {
+    setTokens(prev => prev.map(token => {
+      if (token.id !== tokenId) return token;
+
+      const newCheckpoints = token.checkpoints.map((cp, i) => {
+        const stage = STAGES[i];
+        if (stage.id === stageId) {
+          return {
+            ...cp,
+            status: "completed",
+            timestamp: now(),
+            coords: forcedCoords || cp.coords || genCoords(),
+          };
+        }
+        if (stage.id === stageId + 1 && stageId < 12) {
+          return { ...cp, status: "active" };
+        }
+        return cp;
+      });
+
+      const nextStage = stageId < 12 ? stageId + 1 : 12;
+      const progress = Math.min(100, Math.round((nextStage / 12) * 100));
+      const transparencyScore = Math.min(100, token.transparencyScore + Math.floor(8 + Math.random() * 5));
+      const processingETA = nextStage >= 9 ? `~${Math.floor(Math.random() * 3) + 1} hrs` : token.processingETA;
+      const paymentStatus = stageId === 11 ? "released" : token.paymentStatus;
+
+      const stageName = STAGES.find(s => s.id === stageId)?.label || "";
+      const newEntry = {
+        time: now(),
+        msg: `✓ ${stageName} confirmed by ${STAGES.find(s => s.id === stageId)?.role}`,
+        type: "success"
+      };
+
+      return {
+        ...token,
+        currentStage: nextStage,
+        progress,
+        transparencyScore,
+        processingETA,
+        paymentStatus,
+        checkpoints: newCheckpoints,
+        activityFeed: [...token.activityFeed, newEntry],
+        coords: forcedCoords || token.coords,
+      };
+    }));
+  }, []);
+
+  // Simulate live GPS updates every 8s for in-transit tokens
+  useEffect(() => {
+    tickRef.current = setInterval(() => {
+      setTokens(prev => prev.map(token => {
+        if (token.currentStage === 7) {
+          const newCoords = genCoords();
+          const newEntry = { time: now(), msg: `📡 GPS update: ${newCoords.lat}, ${newCoords.lng}`, type: "info" };
+          return {
+            ...token,
+            coords: newCoords,
+            activityFeed: [...token.activityFeed.slice(-19), newEntry],
+          };
+        }
+        return token;
+      }));
+    }, 8000);
+    return () => clearInterval(tickRef.current);
+  }, []);
+
+  function addNewToken() {
+    if (!newForm.farmerName.trim()) return;
+    const t = createToken(genId("FRM"), newForm.farmerName, newForm.residueType, parseInt(newForm.qty));
+    setTokens(prev => [t, ...prev]);
+    setShowNewModal(false);
+    setNewForm({ farmerName: "", residueType: "Paddy Straw", qty: 200 });
+  }
+
+  const allFeed = tokens.flatMap(t => t.activityFeed.map(a => ({ ...a, tokenId: t.id })))
+    .sort((a, b) => 0).slice(-10).reverse();
+
+  return (
+    <div style={{ fontFamily: "'Segoe UI', system-ui, sans-serif", maxWidth: 780, margin: "0 auto", padding: "0 0 40px" }}>
+      <style>{`
+        @keyframes pulse {
+          0%, 100% { box-shadow: 0 0 0 3px rgba(55,138,221,0.2); }
+          50% { box-shadow: 0 0 0 6px rgba(55,138,221,0.08); }
+        }
+        button:hover { opacity: 0.88; }
+        ::-webkit-scrollbar { width: 4px; }
+        ::-webkit-scrollbar-thumb { background: #ddd; border-radius: 2px; }
+      `}</style>
+
+      {/* Header */}
+      <div style={{
+        background: "linear-gradient(135deg, #1b5e20 0%, #2e7d32 60%, #388e3c 100%)",
+        borderRadius: "0 0 18px 18px", padding: "20px 24px 22px", marginBottom: 20, color: "#fff"
+      }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
+          <div>
+            <div style={{ fontSize: 10, letterSpacing: 3, opacity: 0.7, textTransform: "uppercase", marginBottom: 4 }}>KhetKart</div>
+            <div style={{ fontSize: 20, fontWeight: 700 }}>Live Residue Tracking</div>
+            <div style={{ fontSize: 12, opacity: 0.8, marginTop: 2 }}>
+              {tokens.length} tokens active · {tokens.filter(t => t.currentStage === 7).length} in transit
+            </div>
+          </div>
+          <button onClick={() => setShowNewModal(true)} style={{
+            background: "rgba(255,255,255,0.2)", border: "1px solid rgba(255,255,255,0.4)",
+            borderRadius: 20, padding: "8px 18px", color: "#fff", cursor: "pointer", fontSize: 13, fontWeight: 600
+          }}>
+            + New Listing
+          </button>
+        </div>
+      </div>
+
+      {/* Role switcher */}
+      <div style={{ display: "flex", gap: 8, padding: "0 4px", marginBottom: 20, flexWrap: "wrap" }}>
+        {ROLES.map(r => (
+          <button key={r} onClick={() => setActiveRole(r)} style={{
+            padding: "8px 18px", borderRadius: 20, border: "1px solid",
+            borderColor: activeRole === r ? "#2e7d32" : "#e0e0e0",
+            background: activeRole === r ? "#2e7d32" : "#fff",
+            color: activeRole === r ? "#fff" : "#555",
+            cursor: "pointer", fontWeight: 600, fontSize: 13,
+            transition: "all 0.2s"
+          }}>{r}</button>
+        ))}
+      </div>
+
+      {/* Global activity strip */}
+      <div style={{
+        background: "#fff", border: "1px solid #e8e8e8", borderRadius: 12,
+        padding: "12px 16px", marginBottom: 18
+      }}>
+        <div style={{ fontWeight: 700, fontSize: 12, color: "#888", marginBottom: 8, letterSpacing: 1, textTransform: "uppercase" }}>
+          Live Supply Chain Feed
+        </div>
+        <ActivityFeed feed={allFeed} />
+      </div>
+
+      {/* Dashboard by role */}
+      <div style={{ padding: "0 2px" }}>
+        {activeRole === "Farmer" && <FarmerDashboard tokens={tokens} onAdvance={advanceToken} />}
+        {activeRole === "Transporter" && <TransporterDashboard tokens={tokens} onAdvance={advanceToken} />}
+        {activeRole === "Hub" && <HubDashboard tokens={tokens} onAdvance={advanceToken} />}
+        {activeRole === "Buyer" && <BuyerDashboard tokens={tokens} />}
+      </div>
+
+      {/* New Token Modal */}
+      {showNewModal && (
+        <div style={{
+          position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)",
+          display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100
+        }}>
+          <div style={{
+            background: "#fff", borderRadius: 16, padding: 28, width: 380,
+            boxShadow: "0 8px 40px rgba(0,0,0,0.15)"
+          }}>
+            <div style={{ fontWeight: 700, fontSize: 17, marginBottom: 20 }}>Create New Residue Listing</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+              <div>
+                <label style={{ fontSize: 12, color: "#555", display: "block", marginBottom: 4 }}>Farmer Name</label>
+                <input value={newForm.farmerName} onChange={e => setNewForm(p => ({ ...p, farmerName: e.target.value }))}
+                  placeholder="e.g. Sukhwinder Singh"
+                  style={{ width: "100%", padding: "8px 12px", borderRadius: 8, border: "1px solid #ddd", fontSize: 14, boxSizing: "border-box" }} />
+              </div>
+              <div>
+                <label style={{ fontSize: 12, color: "#555", display: "block", marginBottom: 4 }}>Residue Type</label>
+                <select value={newForm.residueType} onChange={e => setNewForm(p => ({ ...p, residueType: e.target.value }))}
+                  style={{ width: "100%", padding: "8px 12px", borderRadius: 8, border: "1px solid #ddd", fontSize: 14 }}>
+                  <option>Paddy Straw</option>
+                  <option>Wheat Stubble</option>
+                  <option>Sugarcane Bagasse</option>
+                  <option>Corn Stover</option>
+                </select>
+              </div>
+              <div>
+                <label style={{ fontSize: 12, color: "#555", display: "block", marginBottom: 4 }}>Quantity (kg)</label>
+                <input type="number" value={newForm.qty} onChange={e => setNewForm(p => ({ ...p, qty: e.target.value }))}
+                  style={{ width: "100%", padding: "8px 12px", borderRadius: 8, border: "1px solid #ddd", fontSize: 14, boxSizing: "border-box" }} />
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 10, marginTop: 22 }}>
+              <button onClick={addNewToken} style={{
+                flex: 1, padding: "10px", background: "#2e7d32", color: "#fff",
+                border: "none", borderRadius: 10, fontWeight: 700, fontSize: 14, cursor: "pointer"
+              }}>
+                Create Token
+              </button>
+              <button onClick={() => setShowNewModal(false)} style={{
+                padding: "10px 18px", background: "#f5f5f5", color: "#555",
+                border: "none", borderRadius: 10, fontWeight: 600, fontSize: 14, cursor: "pointer"
+              }}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
